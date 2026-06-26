@@ -22,7 +22,7 @@ fn main() {
             (spawn_freecam, spawn_view_model, add_people, scene.spawn()),
         )
         .add_systems(RunFixedMainLoop, move_player)
-        .add_systems(Update, (hello_world, move_player2, (update_people, greet_people).chain()))
+        .add_systems(Update, (hello_world, (update_people, greet_people).chain()))
         .run();
 }
 
@@ -55,10 +55,6 @@ struct Keybinds {
     pub key_left: KeyCode,
     /// [`KeyCode`] for right translation.
     pub key_right: KeyCode,
-    /// [`KeyCode`] for up translation.
-    pub key_up: KeyCode,
-    /// [`KeyCode`] for down translation.
-    pub key_down: KeyCode,
 
     pub key_run: KeyCode,
 
@@ -73,8 +69,6 @@ impl Default for Keybinds {
             key_back: KeyCode::KeyS,
             key_left: KeyCode::KeyA,
             key_right: KeyCode::KeyD,
-            key_up: KeyCode::KeyE,
-            key_down: KeyCode::KeyQ,
             key_run: KeyCode::ShiftLeft,
             key_jump: KeyCode::Space,
         }
@@ -92,7 +86,7 @@ impl Default for PlayerInfo {
             walk_speed: 2.0,
             run_speed: 5.0,
             speed_mult: 1.0,
-            friction: 40.0,
+            friction: 20.0,
             on_ground: false,
         }
     }
@@ -139,32 +133,6 @@ fn spawn_view_model(mut commands: Commands) {
     ));
 }
 
-fn move_player2(
-    time: Res<Time<Real>>,
-    mut windows: Query<(&Window, &mut CursorOptions)>,
-    accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
-    //touch_input: Res<Touches>,
-    //mouse_button_input: Res<ButtonInput<MouseButton>>,
-    key_input: Res<ButtonInput<KeyCode>>,
-    //mut toggle_cursor_grab: Local<bool>,
-    //mut mouse_cursor_grab: Local<bool>,
-    player: Single<(&mut Transform, &mut PlayerInfo), With<Player>>,
-) {
-    let (mut transform, mut player_info) = player.into_inner();
-
-    let player_info = &mut *player_info;
-    let keybinds = &mut player_info.keybinds;
-
-    const GROUND_Y: f32 = 1.0;
-
-    if transform.translation.y <= GROUND_Y {
-        transform.translation.y = GROUND_Y;
-        player_info.velocity_player.y = 0.0;
-        player_info.on_ground = true;
-    }
-
-}
-
 fn move_player(
     time: Res<Time<Real>>,
     mut windows: Query<(&Window, &mut CursorOptions)>,
@@ -195,12 +163,6 @@ fn move_player(
     }
     if key_input.pressed(keybinds.key_left) {
         axis_input.x -= 1.0;
-    }
-    if key_input.pressed(keybinds.key_up) {
-        axis_input.y += 1.0;
-    }
-    if key_input.pressed(keybinds.key_down) {
-        axis_input.y -= 1.0;
     }
 
     // Update velocity
@@ -233,28 +195,33 @@ fn move_player(
         player_info.on_ground = false;
     }
 
-    const GRAVITY: f32 = 4.4;
+    const GRAVITY: f32 = 6.4;
 
     if !player_info.on_ground {
         player_info.velocity_player.y -= GRAVITY * dt;
     }
-    player_info.velocity += player_info.velocity_player;
 
     // Apply movement update
+    let mut forward = *transform.forward();
+    forward.y = 0.0;
+    forward = forward.normalize_or_zero();
+
+    let mut right = *transform.right();
+    right.y = 0.0;
+    right = right.normalize_or_zero();
+
+    // Gravity handles vertical movement.
+    let up = Vec3::Y;
+
     if player_info.velocity != Vec3::ZERO {
-        let mut forward = *transform.forward();
-        forward.y = 0.0;
-        forward = forward.normalize_or_zero();
-
-        let mut right = *transform.right();
-        right.y = 0.0;
-        right = right.normalize_or_zero();
-
-        // Gravity handles vertical movement.
-        let up = Vec3::Y;
         transform.translation += player_info.velocity.x * dt * right
             + player_info.velocity.y * dt * up
             + player_info.velocity.z * dt * forward;
+    }
+    if player_info.velocity_player != Vec3::ZERO {
+        transform.translation += player_info.velocity_player.x * dt * right
+            + player_info.velocity_player.y * dt * up
+            + player_info.velocity_player.z * dt * forward;
     }
 
     let delta = accumulated_mouse_motion.delta;
@@ -282,12 +249,6 @@ fn move_player(
         let (yawl, pitchl, rolll) = transform.rotation.to_euler(EulerRot::YXZ);
         let yawl = yawl + delta_yaw;
 
-        // If the pitch was ±¹⁄₂ π, the camera would look straight up or down.
-        // When the user wants to move the camera back to the horizon, which way should the camera face?
-        // The camera has no way of knowing what direction was "forward" before landing in that extreme position,
-        // so the direction picked will for all intents and purposes be arbitrary.
-        // Another issue is that for mathematical reasons, the yaw will effectively be flipped when the pitch is at the extremes.
-        // To not run into these issues, we clamp the pitch to a safe range.
         const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
         let pitchl = (pitchl + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
@@ -295,6 +256,14 @@ fn move_player(
         player_info.pitch = pitchl;
 
         transform.rotation = Quat::from_euler(EulerRot::YXZ, yawl, pitchl, rolll);
+    }
+
+    const GROUND_Y: f32 = 1.0;
+
+    if transform.translation.y <= GROUND_Y {
+        transform.translation.y = GROUND_Y;
+        player_info.velocity_player.y = 0.0;
+        player_info.on_ground = true;
     }
 }
 
