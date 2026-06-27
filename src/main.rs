@@ -1,3 +1,6 @@
+mod collision;
+
+use crate::collision::*;
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::{
@@ -19,10 +22,16 @@ fn main() {
         .add_plugins((DefaultPlugins, FreeCameraPlugin))
         .add_systems(
             Startup,
-            (spawn_freecam, spawn_view_model, add_people, scene.spawn()),
+            (spawn_freecam, (setup_scene, spawn_view_model).chain()),
         )
-        .add_systems(RunFixedMainLoop, move_player)
-        .add_systems(Update, (hello_world, (update_people, greet_people).chain()))
+        .add_systems(
+            RunFixedMainLoop,
+            (
+                update_window,
+                (move_player, update_collision).chain(),
+            ),
+        )
+        .add_systems(Update, hello_world)
         .run();
 }
 
@@ -41,6 +50,8 @@ struct PlayerInfo {
     pub speed_mult: f32,
     pub friction: f32,
     pub on_ground: bool,
+    pub win_focused: bool,
+    pub in_wall: bool,
 }
 
 #[derive(Component)]
@@ -59,6 +70,8 @@ struct Keybinds {
     pub key_run: KeyCode,
 
     pub key_jump: KeyCode,
+
+    pub key_pause: KeyCode,
 }
 
 impl Default for Keybinds {
@@ -71,6 +84,7 @@ impl Default for Keybinds {
             key_right: KeyCode::KeyD,
             key_run: KeyCode::ShiftLeft,
             key_jump: KeyCode::Space,
+            key_pause: KeyCode::Escape,
         }
     }
 }
@@ -88,6 +102,8 @@ impl Default for PlayerInfo {
             speed_mult: 1.0,
             friction: 20.0,
             on_ground: false,
+            win_focused: true,
+            in_wall: false,
         }
     }
 }
@@ -103,7 +119,8 @@ fn spawn_view_model(mut commands: Commands) {
     commands.spawn((
         Player,
         PlayerInfo::default(),
-        Transform::from_xyz(0.0, 1.0, 0.0),
+        Transform::from_xyz(0.0, 10.0, 0.0),
+        AABB::new(Vec3::splat(-0.25), Vec3::splat(0.25)),
         Visibility::default(),
         children![
             (
@@ -135,7 +152,6 @@ fn spawn_view_model(mut commands: Commands) {
 
 fn move_player(
     time: Res<Time<Real>>,
-    mut windows: Query<(&Window, &mut CursorOptions)>,
     accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
     //touch_input: Res<Touches>,
     //mouse_button_input: Res<ButtonInput<MouseButton>>,
@@ -225,24 +241,8 @@ fn move_player(
     }
 
     let delta = accumulated_mouse_motion.delta;
-    let cursor_grab = true;
-    if cursor_grab {
-        for (window, mut cursor_options) in &mut windows {
-            if !window.focused {
-                continue;
-            }
 
-            cursor_options.grab_mode = CursorGrabMode::Locked;
-            cursor_options.visible = false;
-        }
-    } else {
-        for (_, mut cursor_options) in &mut windows {
-            cursor_options.grab_mode = CursorGrabMode::None;
-            cursor_options.visible = true;
-        }
-    }
-
-    if delta != Vec2::ZERO {
+    if delta != Vec2::ZERO && player_info.win_focused {
         let delta_yaw = -delta.x * keybinds.sensitivity.x;
         let delta_pitch = -delta.y * keybinds.sensitivity.y;
 
@@ -267,6 +267,36 @@ fn move_player(
     }
 }
 
+fn update_window(
+    mut windows: Query<(&Window, &mut CursorOptions)>,
+    key_input: Res<ButtonInput<KeyCode>>,
+    player: Single<(&mut Transform, &mut PlayerInfo), With<Player>>,
+) {
+    let (mut transform, mut player_info) = player.into_inner();
+
+    let player_info = &mut *player_info;
+    let keybinds = &mut player_info.keybinds;
+    if key_input.just_pressed(keybinds.key_pause) {
+        player_info.win_focused = !player_info.win_focused;
+    }
+
+    if player_info.win_focused {
+        for (window, mut cursor_options) in &mut windows {
+            if !window.focused {
+                continue;
+            }
+
+            cursor_options.grab_mode = CursorGrabMode::Locked;
+            cursor_options.visible = false;
+        }
+    } else {
+        for (_, mut cursor_options) in &mut windows {
+            cursor_options.grab_mode = CursorGrabMode::None;
+            cursor_options.visible = true;
+        }
+    }
+}
+
 pub const enable_freecam: bool = false;
 
 fn spawn_freecam(mut commands: Commands) {
@@ -279,42 +309,44 @@ fn spawn_freecam(mut commands: Commands) {
     }
 }
 
-#[derive(Component)]
-struct Person;
-
-#[derive(Component)]
-struct Name(String);
-
-fn add_people(mut commands: Commands) {
-    commands.spawn((Person, Name("Elaina Proctor".to_string())));
-    commands.spawn((Person, Name("Renzo Hume".to_string())));
-    commands.spawn((Person, Name("Zayna Nieves".to_string())));
-}
-
-//Iterator over every Name componenet with name
-fn greet_people(query: Query<&Name, With<Person>>) {}
-
-fn update_people(mut query: Query<&mut Name, With<Person>>) {}
-
-fn scene() -> impl SceneList {
-    bsn_list! [
-        (
-            #CircularBase
-            Mesh3d(asset_value(Circle::new(4.0)))
-            MeshMaterial3d::<StandardMaterial>(asset_value(Color::WHITE))
-            Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-        ),
-        (
-            #Cube
-            Mesh3d(asset_value(Cuboid::new(1.0, 1.0, 1.0)))
-            MeshMaterial3d::<StandardMaterial>(asset_value(Color::srgb_u8(124, 144, 255)))
-            Transform::from_xyz(0.0, 0.5, 0.0)
-        ),
-        (
-            PointLight {
-                shadow_maps_enabled: true,
-            }
-            Transform::from_xyz(4.0, 8.0, 4.0)
-        )
-    ]
+fn setup_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        Name::new("Circle"),
+        Mesh3d(meshes.add(Circle::new(4.0))),
+        MeshMaterial3d::<StandardMaterial>(materials.add(Color::WHITE)),
+        Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+    ));
+    commands.spawn((
+        Name::new("Cube"),
+        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+        MeshMaterial3d::<StandardMaterial>(materials.add(Color::srgb_u8(124, 144, 255))),
+        Transform::from_xyz(0.0, 0.5, 0.0),
+        AABB::new(Vec3::splat(-0.5), Vec3::splat(0.5)),
+    ));
+    commands.spawn((
+        Name::new("Cube"),
+        Mesh3d(meshes.add(Cuboid::new(0.5, 0.5, 0.5))),
+        MeshMaterial3d::<StandardMaterial>(materials.add(Color::srgb_u8(124, 144, 255))),
+        Transform::from_xyz(0.0, 0.5, 1.0),
+        AABB::new(Vec3::splat(-0.25), Vec3::splat(0.25)),
+    ));
+    commands.spawn((
+        Name::new("Cube"),
+        Mesh3d(meshes.add(Cuboid::new(0.20, 0.20, 0.20))),
+        MeshMaterial3d::<StandardMaterial>(materials.add(Color::srgb_u8(124, 144, 255))),
+        Transform::from_xyz(0.0, 1.0, 2.0),
+        AABB::new(Vec3::splat(-0.10), Vec3::splat(0.10)),
+    ));
+    commands.spawn((
+        Name::new("Light"),
+        PointLight {
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 8.0, 4.0),
+    ));
 }
