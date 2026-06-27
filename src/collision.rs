@@ -77,12 +77,13 @@ pub fn update_collision(
 ) {
     let (mut player_transform, mut player_info, player_aabb) = player.into_inner();
 
-    let player_world = AABB::new(
-        player_transform.translation + player_aabb.min,
-        player_transform.translation + player_aabb.max,
-    );
-
+    player_info.on_ground = false;
     for (transform, aabb) in &query {
+        let player_world = AABB::new(
+            player_transform.translation + player_aabb.min,
+            player_transform.translation + player_aabb.max,
+        );
+        
         let world_aabb = AABB::new(
             transform.translation + aabb.min,
             transform.translation + aabb.max,
@@ -92,6 +93,9 @@ pub fn update_collision(
             let (normal, penetration) = world_aabb.collision_info(&player_world);
 
             player_transform.translation += normal * penetration;
+            if normal == Vec3::NEG_Y || normal == Vec3::Y {
+                player_info.on_ground = true;
+            }
         }
     }
 }

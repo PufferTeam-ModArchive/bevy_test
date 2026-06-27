@@ -120,7 +120,7 @@ fn spawn_view_model(mut commands: Commands) {
         Player,
         PlayerInfo::default(),
         Transform::from_xyz(0.0, 10.0, 0.0),
-        AABB::new(Vec3::splat(-0.25), Vec3::splat(0.25)),
+        AABB::new(Vec3::new(-0.25, -0.5, -0.25), Vec3::new(0.25, 0.5, 0.25)),
         Visibility::default(),
         children![
             (
@@ -204,18 +204,19 @@ fn move_player(
         }
     }
 
-    const JUMP_SPEED: f32 = 2.0;
+    const JUMP_SPEED: f32 = 2.1;
 
     if player_info.on_ground && key_input.just_pressed(keybinds.key_jump) {
-        player_info.velocity_player.y += JUMP_SPEED;
+        player_info.velocity_player.y = JUMP_SPEED;
+        println!("VELOCITY: {}", player_info.velocity_player.y);
         player_info.on_ground = false;
+    } else {
+        if !player_info.on_ground {
+            player_info.velocity_player.y -= GRAVITY * dt;
+        }
     }
 
     const GRAVITY: f32 = 6.4;
-
-    if !player_info.on_ground {
-        player_info.velocity_player.y -= GRAVITY * dt;
-    }
 
     // Apply movement update
     let mut forward = *transform.forward();
@@ -256,14 +257,6 @@ fn move_player(
         player_info.pitch = pitchl;
 
         transform.rotation = Quat::from_euler(EulerRot::YXZ, yawl, pitchl, rolll);
-    }
-
-    const GROUND_Y: f32 = 1.0;
-
-    if transform.translation.y <= GROUND_Y {
-        transform.translation.y = GROUND_Y;
-        player_info.velocity_player.y = 0.0;
-        player_info.on_ground = true;
     }
 }
 
@@ -319,6 +312,7 @@ fn setup_scene(
         Mesh3d(meshes.add(Circle::new(4.0))),
         MeshMaterial3d::<StandardMaterial>(materials.add(Color::WHITE)),
         Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+        AABB::new(Vec3::new(-10.0, -1.0, -10.0), Vec3::new(10.0, 0.0, 10.0)),
     ));
     commands.spawn((
         Name::new("Cube"),
@@ -332,6 +326,13 @@ fn setup_scene(
         Mesh3d(meshes.add(Cuboid::new(0.5, 0.5, 0.5))),
         MeshMaterial3d::<StandardMaterial>(materials.add(Color::srgb_u8(124, 144, 255))),
         Transform::from_xyz(0.0, 0.5, 1.0),
+        AABB::new(Vec3::splat(-0.25), Vec3::splat(0.25)),
+    ));
+    commands.spawn((
+        Name::new("Cube"),
+        Mesh3d(meshes.add(Cuboid::new(0.5, 0.5, 0.5))),
+        MeshMaterial3d::<StandardMaterial>(materials.add(Color::srgb_u8(124, 144, 255))),
+        Transform::from_xyz(0.5, 0.15, 1.0),
         AABB::new(Vec3::splat(-0.25), Vec3::splat(0.25)),
     ));
     commands.spawn((
