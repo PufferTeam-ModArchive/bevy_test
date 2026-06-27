@@ -26,10 +26,7 @@ fn main() {
         )
         .add_systems(
             RunFixedMainLoop,
-            (
-                update_window,
-                (move_player, update_collision).chain(),
-            ),
+            (update_window, (move_player, update_collision).chain()),
         )
         .add_systems(Update, hello_world)
         .run();
@@ -114,6 +111,9 @@ struct WorldModelCamera;
 const DEFAULT_RENDER_LAYER: usize = 0;
 
 const VIEW_MODEL_RENDER_LAYER: usize = 1;
+
+const JUMP_SPEED: f32 = 2.1;
+const GRAVITY: f32 = 6.4;
 
 fn spawn_view_model(mut commands: Commands) {
     commands.spawn((
@@ -204,19 +204,14 @@ fn move_player(
         }
     }
 
-    const JUMP_SPEED: f32 = 2.1;
-
     if player_info.on_ground && key_input.just_pressed(keybinds.key_jump) {
         player_info.velocity_player.y = JUMP_SPEED;
-        println!("VELOCITY: {}", player_info.velocity_player.y);
         player_info.on_ground = false;
     } else {
         if !player_info.on_ground {
             player_info.velocity_player.y -= GRAVITY * dt;
         }
     }
-
-    const GRAVITY: f32 = 6.4;
 
     // Apply movement update
     let mut forward = *transform.forward();
