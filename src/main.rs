@@ -7,6 +7,8 @@ use bevy::{
     camera::visibility::RenderLayers,
     //Freecam
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin},
+    color::palettes::css::GOLD,
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::AccumulatedMouseMotion,
     light::NotShadowCaster,
     prelude::*,
@@ -19,16 +21,36 @@ fn hello_world() {
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, FreeCameraPlugin))
+        .add_plugins((
+            DefaultPlugins,
+            FreeCameraPlugin,
+            FrameTimeDiagnosticsPlugin::default(),
+        ))
         .add_systems(
             Startup,
             (spawn_freecam, (setup_scene, spawn_view_model).chain()),
         )
+        .add_systems(FixedUpdate, (advance_physics, update_collision).chain())
         .add_systems(
             RunFixedMainLoop,
-            (update_window, (move_player, update_collision).chain()),
+            (
+                (
+                    //Move the Camera
+                    move_camera,
+                )
+                    .chain()
+                    .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+                (
+                    //Move Player
+                    move_player,
+                    //Move it out of collided objects
+                    interpolate_rendered_transform,
+                )
+                    .chain()
+                    .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+            ),
         )
-        .add_systems(Update, hello_world)
+        .add_systems(Update, (update_window, hello_world, update_text))
         .run();
 }
 
@@ -40,8 +62,6 @@ struct PlayerInfo {
     pub keybinds: Keybinds,
     pub pitch: f32,
     pub yaw: f32,
-    pub velocity: Vec3,
-    pub velocity_player: Vec3,
     pub walk_speed: f32,
     pub run_speed: f32,
     pub speed_mult: f32,
@@ -50,6 +70,32 @@ struct PlayerInfo {
     pub win_focused: bool,
     pub in_wall: bool,
 }
+
+/// A vector representing the player's velocity in the physics simulation.
+#[derive(Debug, Component, Clone, Copy, PartialEq, Default, Deref, DerefMut)]
+struct Velocity(Vec3);
+
+#[derive(Debug, Component, Clone, Copy, PartialEq, Default, Deref, DerefMut)]
+struct VelocityJump(Vec3);
+
+/// A vector representing the player's velocity in the physics simulation.
+#[derive(Debug, Component, Clone, Copy, PartialEq, Default, Deref, DerefMut)]
+struct Acceleration(Vec3);
+
+/// The actual position of the player in the physics simulation.
+/// This is separate from the `Transform`, which is merely a visual representation.
+///
+/// If you want to make sure that this component is always initialized
+/// with the same value as the `Transform`'s translation, you can
+/// use a [component lifecycle hook](https://docs.rs/bevy/latest/bevy/ecs/component/struct.ComponentHooks.html)
+#[derive(Debug, Component, Clone, Copy, PartialEq, Default, Deref, DerefMut)]
+struct PhysicalTranslation(Vec3);
+
+/// The value [`PhysicalTranslation`] had in the last fixed timestep.
+/// Used for interpolation in the `interpolate_rendered_transform` system.
+#[derive(Debug, Component, Clone, Copy, PartialEq, Default, Deref, DerefMut)]
+struct PreviousPhysicalTranslation(Vec3);
+
 
 #[derive(Component)]
 struct Keybinds {
@@ -70,6 +116,9 @@ struct Keybinds {
 
     pub key_pause: KeyCode,
 }
+
+#[derive(Component)]
+struct FPSText;
 
 impl Default for Keybinds {
     fn default() -> Self {
@@ -92,8 +141,6 @@ impl Default for PlayerInfo {
             keybinds: Keybinds::default(),
             pitch: 0.0,
             yaw: 0.0,
-            velocity: Vec3::ZERO,
-            velocity_player: Vec3::ZERO,
             walk_speed: 2.0,
             run_speed: 5.0,
             speed_mult: 1.0,
@@ -112,8 +159,8 @@ const DEFAULT_RENDER_LAYER: usize = 0;
 
 const VIEW_MODEL_RENDER_LAYER: usize = 1;
 
-const JUMP_SPEED: f32 = 2.1;
-const GRAVITY: f32 = 6.4;
+const JUMP_SPEED: f32 = 2.0;
+const GRAVITY: f32 = 5.0;
 
 fn spawn_view_model(mut commands: Commands) {
     commands.spawn((
@@ -122,6 +169,11 @@ fn spawn_view_model(mut commands: Commands) {
         Transform::from_xyz(0.0, 10.0, 0.0),
         AABB::new(Vec3::new(-0.25, -0.5, -0.25), Vec3::new(0.25, 0.5, 0.25)),
         Visibility::default(),
+                Velocity::default(),
+                VelocityJump::default(),
+                Acceleration::default(),
+        PhysicalTranslation::default(),
+        PreviousPhysicalTranslation::default(),
         children![
             (
                 WorldModelCamera,
@@ -152,17 +204,16 @@ fn spawn_view_model(mut commands: Commands) {
 
 fn move_player(
     time: Res<Time<Real>>,
-    accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
     //touch_input: Res<Touches>,
     //mouse_button_input: Res<ButtonInput<MouseButton>>,
     key_input: Res<ButtonInput<KeyCode>>,
     //mut toggle_cursor_grab: Local<bool>,
     //mut mouse_cursor_grab: Local<bool>,
-    player: Single<(&mut Transform, &mut PlayerInfo), With<Player>>,
+    player: Single<(&mut Transform, &mut PlayerInfo, &mut Velocity, &mut VelocityJump, &mut Acceleration), With<Player>>,
 ) {
     let dt = time.delta_secs();
 
-    let (mut transform, mut player_info) = player.into_inner();
+    let (mut transform, mut player_info, mut velocity, mut velocity_jump, mut acceleration) = player.into_inner();
 
     let player_info = &mut *player_info;
     let keybinds = &mut player_info.keybinds;
@@ -195,21 +246,23 @@ fn move_player(
         } else {
             walk_speed * speed_mult
         };
-        player_info.velocity = axis_input.normalize() * max_speed;
+        velocity.0 = axis_input.normalize() * max_speed;
     } else {
         let friction = friction.clamp(0.0, f32::MAX);
-        player_info.velocity.smooth_nudge(&Vec3::ZERO, friction, dt);
-        if player_info.velocity.length_squared() < 1e-6 {
-            player_info.velocity = Vec3::ZERO;
+        velocity.0.smooth_nudge(&Vec3::ZERO, friction, dt);
+        if velocity.0.length_squared() < 1e-6 {
+            velocity.0 = Vec3::ZERO;
         }
     }
 
     if player_info.on_ground && key_input.just_pressed(keybinds.key_jump) {
-        player_info.velocity_player.y = JUMP_SPEED;
+        velocity_jump.0.y = JUMP_SPEED;
         player_info.on_ground = false;
     } else {
         if !player_info.on_ground {
-            player_info.velocity_player.y -= GRAVITY * dt;
+            acceleration.0.y = -GRAVITY;
+        } else {
+            acceleration.0.y = 0.0;
         }
     }
 
@@ -225,16 +278,17 @@ fn move_player(
     // Gravity handles vertical movement.
     let up = Vec3::Y;
 
-    if player_info.velocity != Vec3::ZERO {
-        transform.translation += player_info.velocity.x * dt * right
-            + player_info.velocity.y * dt * up
-            + player_info.velocity.z * dt * forward;
-    }
-    if player_info.velocity_player != Vec3::ZERO {
-        transform.translation += player_info.velocity_player.x * dt * right
-            + player_info.velocity_player.y * dt * up
-            + player_info.velocity_player.z * dt * forward;
-    }
+    velocity.0 = velocity.0.x * right + velocity.0.y * up + velocity.0.z * forward;
+}
+
+fn move_camera(
+    accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
+    player: Single<(&mut Transform, &mut PlayerInfo), With<Player>>,
+) {
+    let (mut transform, mut player_info) = player.into_inner();
+
+    let player_info = &mut *player_info;
+    let keybinds = &mut player_info.keybinds;
 
     let delta = accumulated_mouse_motion.delta;
 
@@ -254,6 +308,48 @@ fn move_player(
         transform.rotation = Quat::from_euler(EulerRot::YXZ, yawl, pitchl, rolll);
     }
 }
+
+fn advance_physics(
+    fixed_time: Res<Time<Fixed>>,
+    mut query: Query<(
+        &mut PhysicalTranslation,
+        &mut PreviousPhysicalTranslation,
+        &mut Velocity,
+        &mut VelocityJump,
+        &Acceleration,
+    )>,
+) {
+    for (mut current_physical_translation, mut previous_physical_translation, mut velocity, mut velocity_jump, acceleration) in
+        query.iter_mut()
+    {
+        previous_physical_translation.0 = current_physical_translation.0;
+        velocity.0 += acceleration.0 * fixed_time.delta_secs();
+        velocity_jump.0 += acceleration.0 * fixed_time.delta_secs();
+        current_physical_translation.0 += velocity.0 * fixed_time.delta_secs();
+        current_physical_translation.0 += velocity_jump.0 * fixed_time.delta_secs();
+    }
+}
+
+fn interpolate_rendered_transform(
+    fixed_time: Res<Time<Fixed>>,
+    mut query: Query<(
+        &mut Transform,
+        &PhysicalTranslation,
+        &PreviousPhysicalTranslation,
+    )>,
+) {
+    for (mut transform, current_physical_translation, previous_physical_translation) in
+        query.iter_mut()
+    {
+        let previous = previous_physical_translation.0;
+        let current = current_physical_translation.0;
+        let alpha = fixed_time.overstep_fraction();
+
+        let rendered_translation = previous.lerp(current, alpha);
+        transform.translation = rendered_translation;
+    }
+}
+
 
 fn update_window(
     mut windows: Query<(&Window, &mut CursorOptions)>,
@@ -300,6 +396,7 @@ fn spawn_freecam(mut commands: Commands) {
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.spawn((
@@ -345,4 +442,40 @@ fn setup_scene(
         },
         Transform::from_xyz(4.0, 8.0, 4.0),
     ));
+    commands
+        .spawn((
+            // Create a Text with multiple child spans.
+            Text::new("FPS: "),
+            TextFont {
+                // This font is loaded and will be used instead of the default font.
+                font: asset_server.load("fonts/FiraSans-Bold.ttf").into(),
+                font_size: FontSize::Px(42.0),
+                ..default()
+            },
+        ))
+        .with_child((
+            TextSpan::default(),
+            (
+                TextFont {
+                    // If the "default_font" feature is unavailable, load a font to use instead.
+                    #[cfg(not(feature = "default_font"))]
+                    font: asset_server.load("fonts/FiraSans-Medium.ttf").into(),
+                    font_size: FontSize::Px(33.0),
+                    ..Default::default()
+                },
+                TextColor(GOLD.into()),
+            ),
+            FPSText,
+        ));
+}
+
+fn update_text(diagnostics: Res<DiagnosticsStore>, mut query: Query<&mut TextSpan, With<FPSText>>) {
+    for mut span in &mut query {
+        if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS)
+            && let Some(value) = fps.smoothed()
+        {
+            // Update the value of the second section
+            **span = format!("{value:.2}");
+        }
+    }
 }

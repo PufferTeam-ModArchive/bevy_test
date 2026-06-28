@@ -73,15 +73,15 @@ impl AABB {
 
 pub fn update_collision(
     query: Query<(&Transform, &AABB), Without<Player>>,
-    player: Single<(&mut Transform, &mut PlayerInfo, &AABB), With<Player>>,
+    player: Single<(&mut Transform, &mut PlayerInfo, &AABB, &mut PhysicalTranslation,), With<Player>>,
 ) {
-    let (mut player_transform, mut player_info, player_aabb) = player.into_inner();
+    let (mut player_transform, mut player_info, player_aabb, mut translation) = player.into_inner();
 
     player_info.on_ground = false;
     for (transform, aabb) in &query {
         let player_world = AABB::new(
-            player_transform.translation + player_aabb.min,
-            player_transform.translation + player_aabb.max,
+            translation.0 + player_aabb.min,
+            translation.0 + player_aabb.max,
         );
         
         let world_aabb = AABB::new(
@@ -92,7 +92,7 @@ pub fn update_collision(
         if player_world.intersects(&world_aabb) {
             let (normal, penetration) = world_aabb.collision_info(&player_world);
 
-            player_transform.translation += normal * penetration;
+            translation.0 += normal * penetration;
             if normal == Vec3::NEG_Y || normal == Vec3::Y {
                 player_info.on_ground = true;
             }
